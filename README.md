@@ -14,6 +14,11 @@ factor_strategy_platform/
 │
 ├── data_manager/             # 数据管理器 (负责数据的加载、清洗、对齐)
 │   └── loader.py
+│   └── DemoData/
+|       └── SampleDownlooad.py
+|       └── daily_index_data.csv
+|       └── daily_market_data.csv
+|       └── quarterly_financial_data.csv
 │
 ├── factor_library/           # 因子库 (存放所有单因子的计算逻辑)
 │   ├── fundamental/          #  └─ 基础面因子

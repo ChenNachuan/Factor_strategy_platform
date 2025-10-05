@@ -65,23 +65,16 @@ if __name__ == '__main__':
     except ImportError:
         import sys
 
-        # ******** 这是核心修改 1 ********
-        # 将项目根目录 (factor_strategy_platform) 添加到Python路径中
-        # __file__ 指的是当前文件 (size_factor.py)
-        # os.path.dirname(__file__) 是 factor_library/fundamental
-        # os.path.join(..., '..', '..') 向上返回两级到项目根目录
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
         if project_root not in sys.path:
             sys.path.append(project_root)
         from data_manager.loader import load_and_clean_data
-        # *******************************
 
-    # ******** 这是核心修改 2 ********
+
     # 构建到数据文件夹的正确路径
-    # 从项目根目录出发，进入 data_manager/DemoData
+
     project_root_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
     SAMPLE_DATA_DIR = os.path.join(project_root_path, "data_manager", "DemoData")
-    # **************************
 
     if os.path.exists(SAMPLE_DATA_DIR):
         master_df, _ = load_and_clean_data(SAMPLE_DATA_DIR)

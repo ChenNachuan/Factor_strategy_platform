@@ -1,12 +1,3 @@
-# -*- coding: utf-8 -*-
-# -----------------------------------------------------------------------------
-# Filename: loader.py
-# Description: 根据《因子投资：方法与实践》的数据处理原则，加载并清洗由
-#              SampleDownload.py 生成的CSV数据。
-# Author: Quant (Your Mentor)
-# Date: 2025-10-03
-# -----------------------------------------------------------------------------
-
 import pandas as pd
 import os
 
@@ -29,12 +20,12 @@ def load_and_clean_data(data_dir):
     print("开始执行数据加载与清洗任务...")
     print("=" * 50)
 
-    # --- 1. 定义文件路径 ---
+    # 定义文件路径
     market_data_path = os.path.join(data_dir, "daily_market_data.csv")
     financial_data_path = os.path.join(data_dir, "quarterly_financial_data.csv")
     index_data_path = os.path.join(data_dir, "daily_index_data.csv")
 
-    # --- 2. 加载数据 ---
+    # 加载数据
     print("\n[步骤 1/4] 正在加载CSV文件...")
     try:
         market_df = pd.read_csv(market_data_path, parse_dates=['date'])
@@ -50,7 +41,7 @@ def load_and_clean_data(data_dir):
         print(f"错误: 文件未找到 - {e}。请先运行 SampleDownload.py 生成数据。")
         return None, None
 
-    # --- 3. 数据清洗与预处理 ---
+    # 数据清洗与预处理
     print("\n[步骤 2/4] 正在进行数据预处理...")
 
     market_df['adj_close'] = market_df['close'] * market_df['adjfactor']
@@ -68,7 +59,7 @@ def load_and_clean_data(data_dir):
     index_df.set_index(['date', 'index_code'], inplace=True)
     print(" -> 指数数据处理完成。")
 
-    # --- 4. 合并数据 ---
+    # 合并数据
     print("\n[步骤 3/4] 正在合并行情与财务数据...")
     market_df_reset = market_df.reset_index()
 
@@ -87,7 +78,7 @@ def load_and_clean_data(data_dir):
         merged_df = market_df_reset
         print("仅使用行情数据，未进行财务数据合并。")
 
-    # --- 5. 最终清洗 ---
+    #  最终清洗
     print("\n[步骤 4/4] 正在进行最终清洗...")
 
     # ******** 这是核心修改 ********

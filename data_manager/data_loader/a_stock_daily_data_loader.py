@@ -54,7 +54,7 @@ if not all_stock_data.empty:
         current_script_path = Path(__file__).resolve()
         # 从当前脚本路径向上回溯两级，到达 data_manager 目录
         data_manager_dir = current_script_path.parent.parent
-        # 构建我们想要的目标存储目录路径
+        # 构建目标存储目录路径
         save_dir = data_manager_dir / 'raw_data'
         
         # 确保目标目录存在，如果不存在就创建它
@@ -65,7 +65,7 @@ if not all_stock_data.empty:
 
         all_stock_data.to_parquet(file_path, engine='pyarrow', index=False)
         
-        # 使用 file_path 变量让输出信息更准确
+        # 输出信息路径
         print(f"数据已成功保存到: {file_path}")
         
     except Exception as e:

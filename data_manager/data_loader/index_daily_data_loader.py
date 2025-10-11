@@ -1,4 +1,4 @@
-import tushare as ts
+import tushare as ts # type: ignore
 import pandas as pd
 import time
 from pathlib import Path

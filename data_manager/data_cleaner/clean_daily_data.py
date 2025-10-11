@@ -1,4 +1,3 @@
-# data_manager/data_cleaner/run_cleaning_pipeline.py
 from pathlib import Path
 from data_loader import load_raw_data
 from cleaning_steps import handle_outliers, handle_missing_values, filter_blacklist

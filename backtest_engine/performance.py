@@ -1,11 +1,3 @@
-# -*- coding: utf-8 -*-
-# -----------------------------------------------------------------------------
-# Filename: performance.py (2x2 绘图升级版)
-# Description: 提供了用于评估投资组合回测性能的工具，增加了IC分析和2x2可视化。
-# Author: Quant (Your Mentor)
-# Date: 2025-10-05
-# -----------------------------------------------------------------------------
-
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -87,14 +79,67 @@ class PerformanceAnalyzer:
         """
         print("\n[Factor Analysis] Calculating Information Coefficient (IC)...")
 
-        factor_name = self.factor_data.columns[0]
-        merged_data = pd.merge(self.factor_data, self.master_data[['next_day_return']], on=['date', 'stock_code'])
+        # 检查数据列名并适配不同的格式
+        factor_columns = self.factor_data.columns.tolist()
+        master_columns = self.master_data.columns.tolist()
+        
+        # 获取第一个数值列作为因子列（跳过日期和股票代码列）
+        factor_name = None
+        for col in factor_columns:
+            if col not in ['date', 'trade_date', 'stock_code', 'ts_code']:
+                factor_name = col
+                break
+        
+        if factor_name is None:
+            raise ValueError("❌ 无法找到有效的因子列")
+        
+        date_col = 'date' if 'date' in self.factor_data.columns else 'trade_date'
+        stock_col = 'stock_code' if 'stock_code' in self.factor_data.columns else 'ts_code'
+        return_col = 'next_day_return' if 'next_day_return' in self.master_data.columns else 'next_return'
+        
+        # 准备合并用的数据 - 只选择需要的列避免重复
+        factor_data_clean = self.factor_data[[date_col, stock_col, factor_name]].copy()
+        factor_data_clean.columns = ['date', 'stock_code', factor_name]
+        
+        master_date_col = 'date' if 'date' in self.master_data.columns else 'trade_date'
+        master_stock_col = 'stock_code' if 'stock_code' in self.master_data.columns else 'ts_code'
+        
+        master_data_clean = self.master_data[[master_date_col, master_stock_col, return_col]].copy()
+        master_data_clean.columns = ['date', 'stock_code', 'next_day_return']
+        
+        merged_data = pd.merge(
+            factor_data_clean, 
+            master_data_clean, 
+            on=['date', 'stock_code']
+        )
         merged_data.dropna(inplace=True)
 
-        daily_ic = merged_data.groupby('date').apply(
-            lambda x: spearmanr(x[factor_name], x['next_day_return'])[0]
-        )
-        self.ic_series = daily_ic.rename('Daily_IC')
+        if len(merged_data) == 0:
+            print("⚠️ 警告: 合并后数据为空，无法计算IC")
+            self.ic_series = pd.Series([], name='Daily_IC')
+            return
+
+        # 计算每日IC
+        ic_list = []
+        dates = []
+        
+        for date, group in merged_data.groupby('date'):
+            if len(group) > 1:
+                # 确保数据类型正确
+                factor_values = group[factor_name].astype(float)
+                return_values = group['next_day_return'].astype(float)
+                
+                # 去除NaN值
+                valid_mask = ~(pd.isna(factor_values) | pd.isna(return_values))
+                if valid_mask.sum() > 1:
+                    try:
+                        correlation, p_value = spearmanr(factor_values[valid_mask], return_values[valid_mask])
+                        ic_list.append(correlation)
+                        dates.append(date)
+                    except (ValueError, TypeError):
+                        continue
+        
+        self.ic_series = pd.Series(ic_list, index=dates, name='Daily_IC')
 
         ic_mean = self.ic_series.mean()
         ic_std = self.ic_series.std()
@@ -161,6 +206,6 @@ class PerformanceAnalyzer:
         axes[1, 1].set_ylabel('Rolling IC Mean')
         axes[1, 1].legend()
 
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout to make room for suptitle
+        plt.tight_layout(rect=(0, 0.03, 1, 0.95))  # Adjust layout to make room for suptitle
         plt.show()
         print("Plotting complete.")

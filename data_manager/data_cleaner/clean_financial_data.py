@@ -1,8 +1,14 @@
-# data_manager/data_cleaner/clean_financial_data.py
-
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import sys
+
+# 添加项目根路径以便导入 config
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from config import RAW_DATA_PATH, CLEAN_DATA_PATH
 
 def handle_financial_outliers_mad(df: pd.DataFrame, numeric_cols: list) -> pd.DataFrame:
     """
@@ -38,16 +44,11 @@ def clean_financial_data_pipeline():
     print("--- 开始财务数据清洗流程 ---")
 
     # 定义原始数据路径和文件名 (使用相对路径)
-    raw_data_path = Path(__file__).resolve().parent.parent / 'raw_data'
     financial_files = {
-        'balancesheet': raw_data_path / 'a_stock_balancesheet_data.parquet',
-        'cashflow': raw_data_path / 'a_stock_cashflow_data.parquet',
-        'income': raw_data_path / 'a_stock_income_data.parquet'
+        'balancesheet': RAW_DATA_PATH / 'a_stock_balancesheet_data.parquet',
+        'cashflow': RAW_DATA_PATH / 'a_stock_cashflow_data.parquet',
+        'income': RAW_DATA_PATH / 'a_stock_income_data.parquet'
     }
-
-    # 定义清洗后数据的保存路径
-    clean_data_path = Path(__file__).resolve().parent.parent / 'clean_data'
-    clean_data_path.mkdir(parents=True, exist_ok=True)
 
     # 循环处理每个财务报表文件
     for name, file_path in financial_files.items():
@@ -56,9 +57,9 @@ def clean_financial_data_pipeline():
         # 1. 加载数据
         try:
             df = pd.read_parquet(file_path)
-            print(f"✅ 成功加载原始 {name} 数据 {len(df)} 条。")
+            print(f"成功加载原始 {name} 数据 {len(df)} 条。")
         except FileNotFoundError:
-            print(f"❌ 错误: 找不到文件 '{file_path}'！")
+            print(f"错误: 找不到文件 '{file_path}'！")
             continue
 
         # 2. 识别需要清洗的数值列
@@ -74,9 +75,9 @@ def clean_financial_data_pipeline():
         df = handle_financial_outliers_mad(df, numeric_cols)
         
         # 5. 存储清洗后的数据
-        save_file = clean_data_path / f"a_stock_{name}_data_clean.parquet"
+        save_file = CLEAN_DATA_PATH / f"a_stock_{name}_data_clean.parquet"
         df.to_parquet(save_file, index=False)
-        print(f"✅ 清洗后的 {name} 数据已保存至: {save_file}")
+        print(f"清洗后的 {name} 数据已保存至: {save_file}")
 
     print("\n--- 所有财务数据清洗流程全部完成！ ---")
 

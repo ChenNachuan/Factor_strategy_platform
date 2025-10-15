@@ -31,6 +31,7 @@ class DataManager:
         
         # 数据缓存
         self._cache = {}
+        self._load_message_shown = set()
         
         # 文件映射
         self.file_mapping = {
@@ -112,9 +113,14 @@ class DataManager:
                 
             if verbose:
                 status = "清洗后" if cleaned else "原始"
-                print(f" {status}数据加载成功！")
-                print(f"  数据类型: {data_type}")
-                print(f"  数据量: {len(df):,} 条记录，{len(df.columns)} 列")
+                log_key = (data_type, cleaned)
+                if log_key not in self._load_message_shown:
+                    print(f" {status}数据加载成功！")
+                    print(f"  数据类型: {data_type}")
+                    print(f"  数据量: {len(df):,} 条记录，{len(df.columns)} 列")
+                    self._load_message_shown.add(log_key)
+                else:
+                    print(f" {status}数据加载成功（重复调用，已省略详细信息）")
                 
             return df
         except FileNotFoundError:
@@ -179,14 +185,25 @@ class DataManager:
             List[str]: 股票代码列表
         """
         try:
-            df = self.load_data('daily', cleaned=True, verbose=False)
+            # 从stock_basic.parquet加载，效率更高
+            basic_data_path = self.raw_data_path / 'stock_basic.parquet'
+            if not basic_data_path.exists():
+                print("警告: stock_basic.parquet 不存在，回退到加载日线数据")
+                df = self.load_data('daily', cleaned=True, verbose=False)
+            else:
+                df = pd.read_parquet(basic_data_path)
+                if trade_date:
+                    # 如果需要按日期筛选，仍需加载日线数据
+                    daily_df = self.load_data('daily', cleaned=True, verbose=False, start_date=trade_date, end_date=trade_date)
+                    if daily_df is not None and not daily_df.empty:
+                        valid_codes = daily_df['ts_code'].unique()
+                        df = df[df['ts_code'].isin(valid_codes)]
+                    else:
+                        return []
+
             if df is None:
                 return []
                 
-            # 过滤日期
-            if trade_date:
-                df = df[df['trade_date'] == trade_date]
-            
             # 排除ST股票
             if exclude_st and 'name' in df.columns:
                 df = df[~df['name'].str.contains('ST', na=False)]
@@ -403,16 +420,16 @@ def validate_data_quality(df: pd.DataFrame, data_type: str) -> Dict[str, Union[i
 def print_data_summary(summary: Dict[str, Dict]):
     """打印数据概览"""
     print("=" * 60)
-    print("📊 数据概览")
+    print("数据概览")
     print("=" * 60)
     
     for data_type, info in summary.items():
         if 'error' in info:
-            print(f"❌ {data_type}: {info['error']}")
+            print(f"{data_type}: {info['error']}")
         else:
-            print(f"✅ {data_type}:")
-            print(f"   📈 数据量: {info['rows']:,} 行 × {info['columns']} 列")
-            print(f"   💾 内存占用: {info['memory_mb']:.1f} MB")
+            print(f"{data_type}:")
+            print(f"   数据量: {info['rows']:,} 行 × {info['columns']} 列")
+            print(f"   内存占用: {info['memory_mb']:.1f} MB")
             if 'date_range' in info:
-                print(f"   📅 时间范围: {info['date_range'][0]} ~ {info['date_range'][1]}")
+                print(f"   时间范围: {info['date_range'][0]} ~ {info['date_range'][1]}")
         print()

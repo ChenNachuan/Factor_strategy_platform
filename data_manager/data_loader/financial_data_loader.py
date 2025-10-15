@@ -3,9 +3,10 @@ import pandas as pd
 import time
 from pathlib import Path
 from datetime import datetime
+from config import get_tushare_token, RAW_DATA_PATH
 
 # 初始化 Tushare API
-ts.set_token('a5dfb5990b7a5e9eda778b060c8c987f9a7fbd2a5caae8ddc7298197')
+ts.set_token(get_tushare_token())
 pro = ts.pro_api()
 
 print("Tushare API 初始化成功。")
@@ -68,7 +69,7 @@ for index, row in stock_list_df.iterrows():
                 print(f"  未找到 {ts_code} 的 {report_name} 数据。")
 
             # API频率限制：每次调用后强制等待，Tushare对财务数据接口有更严格的限制
-            time.sleep(0.1) # 建议等待0.6秒以上
+            time.sleep(0.6) # 建议等待0.6秒以上
 
         except Exception as e:
             print(f"  获取 {ts_code} 的 {report_name} 数据时出错: {e}")
@@ -81,19 +82,8 @@ print("\n所有股票的财务数据获取循环执行完毕！")
 # --- 5. 将数据存储为 Parquet 格式 ---
 print("\n开始将数据存储到 Parquet 文件...")
 try:
-    # 获取当前脚本文件(.py)的绝对路径 (注意：在Jupyter等环境中 __file__ 可能未定义)
-    # 为了通用性，我们直接使用 Path.cwd() 获取当前工作目录，并向上回溯
-    # 如果您的脚本结构固定，也可以使用您原来的方法
-    try:
-        current_script_path = Path(__file__).resolve()
-        # 假设脚本在 a_stock_financial_downloader/scripts/ 目录下
-        data_manager_dir = current_script_path.parent.parent
-    except NameError:
-        print("警告: `__file__` 未定义，将使用当前工作目录的上级目录作为项目根目录。")
-        data_manager_dir = Path.cwd().parent 
-
     # 构建目标存储目录路径
-    save_dir = data_manager_dir / 'raw_data'
+    save_dir = RAW_DATA_PATH
     
     # 确保目标目录存在
     save_dir.mkdir(parents=True, exist_ok=True)

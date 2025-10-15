@@ -1,6 +1,14 @@
 import pandas as pd
 from pathlib import Path
+import sys
+
+# 添加项目根路径以便导入 config
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
 from cleaning_steps import handle_outliers, handle_missing_values
+from config import RAW_DATA_PATH, CLEAN_DATA_PATH
 
 def clean_index_pipeline():
     """
@@ -9,8 +17,7 @@ def clean_index_pipeline():
     print("--- 开始指数数据清洗流程 ---")
 
     # --- 1. 加载原始指数数据 (使用相对路径) ---
-    raw_data_path = Path(__file__).resolve().parent.parent / 'raw_data'
-    index_data_file = raw_data_path / 'a_index_daily_data.parquet'
+    index_data_file = RAW_DATA_PATH / 'a_index_daily_data.parquet'
 
     try:
         df = pd.read_parquet(index_data_file)
@@ -32,9 +39,7 @@ def clean_index_pipeline():
     df = handle_missing_values(df)
 
     # --- 3. 存储清洗后的数据 ---
-    clean_data_path = Path(__file__).resolve().parent.parent / 'clean_data'
-    clean_data_path.mkdir(parents=True, exist_ok=True)
-    save_file = clean_data_path / 'a_index_daily_data_clean.parquet'
+    save_file = CLEAN_DATA_PATH / 'a_index_daily_data_clean.parquet'
     
     df.to_parquet(save_file, index=False)
     

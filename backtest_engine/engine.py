@@ -13,13 +13,11 @@ sys.path.append(str(project_root / 'factor_library' / 'fundamental'))
 
 try:
     from backtest_engine.performance import PerformanceAnalyzer
-    from data import DataManager
+    from data_manager.data import DataManager
 except ImportError as e:
     print(f"导入模块失败: {e}")
     print("请确保相关模块存在且可访问")
     raise
-
-
 
 class BacktestEngine:
     """
@@ -37,7 +35,8 @@ class BacktestEngine:
                  n_groups: int = 5, 
                  fee: float = 0.001, 
                  long_direction: str = 'high',
-                 rebalance_freq: str = 'weekly'):
+                 rebalance_freq: str = 'weekly',
+                 factor_name: str = 'factor'):
         """
         初始化回测引擎
 
@@ -49,11 +48,13 @@ class BacktestEngine:
                 'high' - 做多因子值最高的组 (适用于正向因子)
                 'low' - 做多因子值最低的组 (适用于负向因子)
             rebalance_freq: 调仓频率 ['daily', 'weekly', 'monthly']
+            factor_name: 因子列名，默认为 'factor'
         """
         self.data_manager = data_manager or DataManager()
         self.n_groups = n_groups
         self.fee = fee
         self.rebalance_freq = rebalance_freq
+        self.factor_name = factor_name
         
         if long_direction not in ['high', 'low']:
             raise ValueError("参数 long_direction 必须是 'high' 或 'low'")
@@ -72,6 +73,7 @@ class BacktestEngine:
         print(f"   多头方向: {self.long_direction}")
         print(f"   调仓频率: {self.rebalance_freq}")
         print(f"   交易费用: {self.fee:.3%}")
+        print(f"   因子名称: {self.factor_name}")
 
     def prepare_data(self, 
                     start_date: str,
@@ -92,12 +94,13 @@ class BacktestEngine:
         
         # 1. 计算因子数据
         print("🔄 计算规模因子...")
-        size_calculator = SizeFactor(self.data_manager)
-        self.factor_data = size_calculator.calculate_factor(
+        # 延迟导入，避免循环依赖
+        from factor_library.fundamental.size_factor import calculate_size_factor
+        self.factor_data = calculate_size_factor(
+            data_manager=self.data_manager,
             start_date=start_date,
             end_date=end_date,
             stock_codes=stock_codes,
-            method=factor_method
         )
         
         # 2. 加载股票价格数据
@@ -131,9 +134,18 @@ class BacktestEngine:
             how='inner'
         )
         
-        # 移除缺失值
-        factor_col = self.factor_data.columns[0]
-        self.combined_data.dropna(subset=[factor_col, 'next_return'], inplace=True)
+        # 移除缺失值（使用显式的因子列名）
+        if self.factor_name not in self.combined_data.columns:
+            # 如果指定的因子名不存在，尝试使用第一个非标准列
+            standard_cols = {'ts_code', 'trade_date', 'next_return'}
+            available_factors = [c for c in self.combined_data.columns if c not in standard_cols]
+            if available_factors:
+                self.factor_name = available_factors[0]
+                print(f"   因子列 '{self.factor_name}' 自动识别")
+            else:
+                raise ValueError(f"❌ 无法找到因子列 '{self.factor_name}'")
+        
+        self.combined_data.dropna(subset=[self.factor_name, 'next_return'], inplace=True)
         
         print(f"✅ 数据准备完成:")
         print(f"   因子数据: {len(self.factor_data):,} 条")
@@ -183,9 +195,13 @@ class BacktestEngine:
         rebalance_dates = self._get_rebalance_dates()
         print(f"   调仓次数: {len(rebalance_dates)} 次")
         
-        # 2. 按调仓日期分组并计算收益率
-        factor_col = self.factor_data.columns[0]
+        # 2. 按调仓日期分组并计算收益率（使用显式的因子名）
+        if self.factor_data is None:
+            raise ValueError("❌ 缺少因子数据，请先调用 prepare_data 方法")
+        
         all_returns = []
+        last_positions = None  # 记录上期等权持仓集合
+        turnover_cost_series = []  # 记录仅在调仓日扣除的成本（对组合收益的冲击）
         
         for i, rebal_date in enumerate(rebalance_dates):
             if i == len(rebalance_dates) - 1:
@@ -201,10 +217,10 @@ class BacktestEngine:
             if len(rebal_data) == 0:
                 continue
                 
-            # 分组
+            # 分组（使用显式的因子名）
             try:
                 rebal_data['group'] = pd.qcut(
-                    rebal_data[factor_col], 
+                    rebal_data[self.factor_name], 
                     self.n_groups, 
                     labels=False, 
                     duplicates='drop'
@@ -212,7 +228,7 @@ class BacktestEngine:
             except ValueError:
                 # 处理分位数相同的情况
                 rebal_data['group'] = pd.cut(
-                    rebal_data[factor_col], 
+                    rebal_data[self.factor_name], 
                     self.n_groups, 
                     labels=False
                 ) + 1
@@ -235,6 +251,23 @@ class BacktestEngine:
             group_returns = period_data.groupby(['trade_date', 'group'])['next_return'].mean().unstack()
             group_returns.columns = [f'Group_{int(g)}' for g in group_returns.columns]
             
+            # 计算本期等权持仓（以组为单位，后续组合构建再取top/bottom）
+            # 这里记录股票层面的持仓集合用于换手率估计
+            current_positions = set(rebal_data['ts_code'])
+            if self.fee > 0:
+                if last_positions is None:
+                    est_turnover = 1.0  # 首期建仓视为100%换手
+                else:
+                    # 近似换手率 = (新旧持仓的对称差集规模) / 当前持仓规模
+                    diff_count = len(current_positions.symmetric_difference(last_positions))
+                    denom = max(len(current_positions | last_positions), 1)
+                    est_turnover = diff_count / denom
+                # 将该期的成本分配到期首的第一个交易日作为一次性冲击
+                if not group_returns.empty:
+                    first_day = group_returns.index.min()
+                    turnover_cost_series.append((first_day, est_turnover * self.fee))
+            last_positions = current_positions
+
             all_returns.append(group_returns)
         
         # 3. 合并所有期间的收益率
@@ -260,16 +293,21 @@ class BacktestEngine:
         portfolio_returns['Long_Short'] = long_portfolio - short_portfolio
         portfolio_returns['Long_Only'] = long_portfolio
         
-        # 6. 考虑交易成本
-        if self.fee > 0:
-            # 计算调仓次数对应的成本
-            trading_cost_long = self.fee / len(rebalance_dates) * len(portfolio_returns)
-            trading_cost_ls = self.fee * 2 / len(rebalance_dates) * len(portfolio_returns)
-            
-            portfolio_returns['Long_Only'] = portfolio_returns['Long_Only'] - trading_cost_long
-            portfolio_returns['Long_Short'] = portfolio_returns['Long_Short'] - trading_cost_ls
-            
-            print(f"💰 交易成本: 单边 {self.fee:.3%}, 双边 {self.fee*2:.3%}")
+        # 6. 考虑交易成本（仅在调仓日按估计换手率一次性扣除）
+        if self.fee > 0 and turnover_cost_series:
+            cost_df = (
+                pd.DataFrame(turnover_cost_series, columns=['trade_date', 'cost'])
+                .groupby('trade_date')['cost']
+                .sum()
+            )
+            # 构建与组合收益对齐的成本序列
+            cost_series = pd.Series(0.0, index=portfolio_returns.index)
+            common_idx = cost_series.index.intersection(cost_df.index)
+            cost_series.loc[common_idx] = cost_df.loc[common_idx].values
+            # 对 Long_Only 视作单边成本；Long_Short 视作双边成本近似
+            portfolio_returns['Long_Only'] = portfolio_returns['Long_Only'] - cost_series
+            portfolio_returns['Long_Short'] = portfolio_returns['Long_Short'] - 2 * cost_series
+            print(f"💰 交易成本: 在 {len(cost_df)} 次调仓日按估计换手率扣除，单边费率 {self.fee:.3%}")
         
         self.portfolio_returns = portfolio_returns
         
@@ -304,9 +342,8 @@ class BacktestEngine:
         factor_data_formatted['date'] = factor_data_formatted['trade_date']
         factor_data_formatted['stock_code'] = factor_data_formatted['ts_code']
         
-        # 只保留因子列，避免日期列被误识别
-        factor_col = self.factor_data.columns[0]
-        factor_data_final = factor_data_formatted[['date', 'stock_code', factor_col]].copy()
+        # 使用显式的因子名，避免索引硬编码
+        factor_data_final = factor_data_formatted[['date', 'stock_code', self.factor_name]].copy()
         
         analyzer = PerformanceAnalyzer(
             portfolio_returns=self.portfolio_returns,
@@ -317,303 +354,36 @@ class BacktestEngine:
         return analyzer
 
 
-def run_backtest(factor_data: pd.DataFrame,
-                data_manager: DataManager,
-                start_date: str,
-                end_date: str,
-                rebalance_freq: str = 'weekly',
-                transaction_cost: float = 0.0) -> tuple:
-    """
-    简化的回测函数，接受预计算的因子数据
-    
-    参数:
-        factor_data: 预计算的因子数据 (MultiIndex: trade_date, stock_code)
-        data_manager: 数据管理器实例
-        start_date: 开始日期
-        end_date: 结束日期
-        rebalance_freq: 调仓频率
-        transaction_cost: 交易费用
-        
-    返回:
-        tuple: (portfolio_returns, positions)
-    """
-    print(f"🎯 开始简化回测流程...")
-    
-    # 创建回测引擎实例
-    engine = BacktestEngine(
-        data_manager=data_manager,
-        transaction_cost=transaction_cost
-    )
-    
-    # 获取股票代码列表
-    stock_codes = factor_data.index.get_level_values('stock_code').unique().tolist()
-    
-    # 加载股票价格数据
-    stock_data = data_manager.load_data(
-        'daily',
-        start_date=start_date,
-        end_date=end_date,
-        stock_codes=stock_codes
-    )
-    
-    if stock_data is None or stock_data.empty:
-        raise ValueError("无法加载股票价格数据")
-    
-    # 计算股票收益率
-    stock_data = stock_data.sort_values(['ts_code', 'trade_date'])
-    stock_data['next_return'] = stock_data.groupby('ts_code')['close'].pct_change().shift(-1)
-    
-    # 执行简化的回测逻辑
-    return _simple_backtest(factor_data, stock_data, rebalance_freq, transaction_cost)
-
-
-def _simple_backtest(factor_data, stock_data, rebalance_freq, transaction_cost):
-    """简化的回测实现"""
-    # 合并因子和收益率数据
-    factor_reset = factor_data.reset_index()
-    stock_subset = stock_data[['ts_code', 'trade_date', 'next_return']].copy()
-    
-    combined_data = pd.merge(
-        factor_reset, 
-        stock_subset,
-        left_on=['stock_code', 'date'],
-        right_on=['ts_code', 'trade_date'],
-        how='inner'
-    )
-    
-    if combined_data.empty:
-        raise ValueError("因子数据与价格数据合并后为空")
-    
-    # 按日期分组计算收益率
-    daily_returns = []
-    positions_records = []
-    
-    # 获取交易日期
-    dates = sorted(combined_data['trade_date'].unique())
-    
-    # 设置调仓频率
-    rebalance_interval = {'daily': 1, 'weekly': 5, 'monthly': 20}.get(rebalance_freq, 5)
-    
-    for i, date in enumerate(dates[:-1]):  # 排除最后一天，因为没有下一天收益
-        # 检查是否需要调仓
-        if i % rebalance_interval == 0:
-            # 获取当日因子数据
-            today_data = combined_data[combined_data['trade_date'] == date]
-            
-            if len(today_data) > 0:
-                # 简单策略：按因子值分组，做多因子值最高的50%
-                n_stocks = len(today_data)
-                top_n = max(1, n_stocks // 2)
-                
-                # 按因子值排序
-                today_data = today_data.sort_values('factor', ascending=False)
-                selected_stocks = today_data.head(top_n)
-                
-                # 等权重配置
-                weights = {stock: 1.0/len(selected_stocks) for stock in selected_stocks['ts_code']}
-                
-                positions_records.append({
-                    'date': date,
-                    'positions': weights
-                })
-                
-                # 计算组合收益率
-                portfolio_return = selected_stocks['next_return'].mean()
-                
-                # 减去交易费用（简化处理）
-                if i > 0:  # 第一次建仓不收费
-                    portfolio_return -= transaction_cost
-                
-                daily_returns.append(portfolio_return)
-            else:
-                daily_returns.append(0.0)
-        else:
-            # 非调仓日，使用上次的持仓
-            if positions_records:
-                last_positions = positions_records[-1]['positions']
-                today_data = combined_data[combined_data['trade_date'] == date]
-                
-                if len(today_data) > 0:
-                    held_stocks = today_data[today_data['ts_code'].isin(last_positions.keys())]
-                    if len(held_stocks) > 0:
-                        portfolio_return = held_stocks['next_return'].mean()
-                        daily_returns.append(portfolio_return)
-                    else:
-                        daily_returns.append(0.0)
-                else:
-                    daily_returns.append(0.0)
-            else:
-                daily_returns.append(0.0)
-    
-    # 转换为pandas Series
-    portfolio_returns = pd.Series(daily_returns, index=dates[:-1])
-    positions_df = pd.DataFrame(positions_records)
-    
-    print(f"✅ 简化回测完成!")
-    print(f"  收益序列长度: {len(portfolio_returns)}")
-    print(f"  调仓记录: {len(positions_records)}")
-    
-    return portfolio_returns, positions_df
-    """
-    便捷的回测运行函数
-    
-    Args:
-        start_date: 开始日期
-        end_date: 结束日期
-        stock_codes: 股票代码列表
-        factor_method: 因子计算方法
-        n_groups: 分组数量
-        long_direction: 多头方向
-        rebalance_freq: 调仓频率
-        fee: 交易费用
-        show_analysis: 是否显示分析结果
-        
-    Returns:
-        Dict: 包含回测结果的字典
-    """
-    print("🎯 开始运行便捷回测流程...")
-    
-    # 1. 创建回测引擎
-    engine = BacktestEngine(
-        n_groups=n_groups,
-        long_direction=long_direction,
-        rebalance_freq=rebalance_freq,
-        fee=fee
-    )
-    
-    # 2. 准备数据
-    engine.prepare_data(
-        start_date=start_date,
-        end_date=end_date,
-        stock_codes=stock_codes,
-        factor_method=factor_method
-    )
-    
-    # 3. 运行回测
-    returns = engine.run()
-    
-    # 4. 性能分析
-    analyzer = engine.get_performance_analysis()
-    metrics = analyzer.calculate_metrics()
-    
-    if show_analysis:
-        analyzer.plot_results()
-    
-    result = {
-        'returns': returns,
-        'metrics': metrics,
-        'analyzer': analyzer,
-        'engine': engine
-    }
-    
-    print("🎉 便捷回测流程完成！")
-    return result
-
-
 def main():
     """
     主函数：演示新的回测引擎使用方法
     """
     print("=" * 60)
-    print("📊 规模因子回测演示 (重构版)")
+    print("规模因子回测演示 (重构版)")
     print("=" * 60)
     
+    # 注意：这只是一个演示函数，实际使用中应该通过 size_factor.py 来运行回测
+    print("此 main 函数仅用于演示，请使用 size_factor.py 中的 run_size_factor_backtest 函数")
+    print("例如：")
+    print("from factor_library.fundamental.size_factor import run_size_factor_backtest")
+    print("result = run_size_factor_backtest(start_date='2024-01-01', end_date='2024-03-31')")
+    
     try:
-        # 使用便捷函数运行回测
-        result = run_backtest(
+        # 这里可以添加一个简单的测试，但主要逻辑应该在 size_factor.py 中
+        from factor_library.fundamental.size_factor import run_size_factor_backtest
+        
+        result = run_size_factor_backtest(
             start_date='2024-01-01',
-            end_date='2024-06-30',
-            stock_codes=['000001.SZ', '000002.SZ', '600000.SH', '600036.SH'],
-            factor_method='log_market_cap',
-            n_groups=3,  # 样本较小，使用3组
-            long_direction='low',  # 规模因子通常小市值表现更好
-            rebalance_freq='weekly',
-            fee=0.001,
-            show_analysis=True
+            end_date='2024-01-31',
+            long_direction='low'
         )
         
-        print("\n📈 回测结果概览:")
-        print(f"策略收益率统计:")
-        print(result['returns'][['Long_Only', 'Long_Short']].describe())
-        
-        print(f"\n📊 性能指标:")
-        print(result['metrics'])
+        print(f"\n测试运行成功！策略总收益率: {result['performance_metrics']['total_return']:.4f}")
         
     except Exception as e:
-        print(f"❌ 回测执行失败: {e}")
+        print(f"测试运行失败: {e}")
         import traceback
         traceback.print_exc()
-
-
-def run_backtest(factor_data: pd.DataFrame,
-                data_manager: DataManager,
-                start_date: str,
-                end_date: str,
-                rebalance_freq: str = 'weekly',
-                transaction_cost: float = 0.0) -> tuple:
-    """
-    简化的回测函数，接受预计算的因子数据
-    
-    参数:
-        factor_data: 预计算的因子数据 (MultiIndex: date, stock_code)
-        data_manager: 数据管理器实例
-        start_date: 开始日期
-        end_date: 结束日期
-        rebalance_freq: 调仓频率
-        transaction_cost: 交易费用
-        
-    返回:
-        tuple: (portfolio_returns, positions)
-    """
-    print(f"🎯 开始简化回测流程...")
-    
-    # 创建回测引擎实例
-    engine = BacktestEngine(
-        data_manager=data_manager,
-        fee=transaction_cost
-    )
-    
-    # 直接设置因子数据
-    engine.factor_data = factor_data
-    
-    # 获取股票代码列表
-    stock_codes = factor_data.index.get_level_values('stock_code').unique().tolist()
-    
-    # 加载股票价格数据
-    stock_data = data_manager.load_data(
-        'daily',
-        start_date=start_date,
-        end_date=end_date,
-        stock_codes=stock_codes
-    )
-    
-    if stock_data is None or stock_data.empty:
-        raise ValueError("无法加载股票价格数据")
-    
-    # 计算股票收益率
-    stock_data = stock_data.sort_values(['ts_code', 'trade_date'])
-    stock_data['next_return'] = stock_data.groupby('ts_code')['close'].pct_change().shift(-1)
-    
-    # 合并因子和收益率数据
-    factor_reset = factor_data.reset_index()
-    stock_subset = stock_data[['ts_code', 'trade_date', 'next_return']].copy()
-    
-    combined_data = pd.merge(
-        factor_reset, 
-        stock_subset,
-        left_on=['stock_code', 'date'],
-        right_on=['ts_code', 'trade_date'],
-        how='inner'
-    )
-    
-    if combined_data.empty:
-        raise ValueError("因子数据与价格数据合并后为空")
-    
-    # 设置合并后的数据
-    engine.combined_data = combined_data
-    
-    # 执行简化的回测逻辑
-    return _simple_backtest(factor_data, stock_data, rebalance_freq, transaction_cost)
 
 
 if __name__ == '__main__':

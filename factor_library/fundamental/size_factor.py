@@ -1,322 +1,207 @@
-"""
-规模因子计算模块
-
-功能：计算股票的对数市值因子
-方法：简化的函数式编程实现，避免不必要的类结构
-
-作者：Factor Strategy Platform
-"""
-
 import pandas as pd
 import numpy as np
 import sys
-import os
 from pathlib import Path
 from typing import Optional, List
 
-# 添加数据管理器路径
-sys.path.append(str(Path(__file__).parent.parent.parent / 'data_manager'))
-sys.path.append(str(Path(__file__).parent.parent.parent / 'backtest_engine'))
+# 路径：把项目根目录加入 sys.path，便于使用绝对包导入
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
 
-try:
-    from data import DataManager
-except ImportError as e:
-    print(f"导入模块失败: {e}")
-    print("请确保相关模块文件存在")
+from data_manager.data import DataManager
 
 
-def calculate_size_factor(data_manager: DataManager,
-                         start_date: str,
-                         end_date: str,
-                         stock_codes: Optional[List[str]] = None) -> pd.DataFrame:
+def calculate_size_factor(
+    data_manager: DataManager,
+    start_date: str,
+    end_date: str,
+    stock_codes: Optional[List[str]] = None,
+) -> pd.DataFrame:
     """
-    计算规模因子（对数市值）
-    
-    参数:
-        data_manager: 数据管理器实例
-        start_date: 开始日期 (YYYY-MM-DD)
-        end_date: 结束日期 (YYYY-MM-DD)
-        stock_codes: 股票代码列表，None表示使用默认股票池
-    
-    返回:
-        DataFrame: MultiIndex (trade_date, stock_code) 格式的因子数据
+    计算规模因子（对数市值），用公告日(ann_date)对齐总股本并向后匹配到交易日，避免前视偏差。
+
+    Returns
+    -------
+    DataFrame
+        MultiIndex (trade_date, ts_code) with single column 'factor'.
     """
-    print(f"🧮 开始计算规模因子...")
-    print(f"  时间范围: {start_date} 至 {end_date}")
-    
-    # 使用默认股票池
+    # 股票池
     if stock_codes is None:
-        stock_codes = [
-            '000001.SZ', '000002.SZ', '000858.SZ',
-            '600000.SH', '600036.SH', '600519.SH'
-        ]
-    
-    print(f"  股票数量: {len(stock_codes)}")
-    
-    try:
-        # 获取股票日行情数据
-        daily_data = data_manager.load_data(
-            data_type='daily',
-            start_date=start_date,
-            end_date=end_date,
-            stock_codes=stock_codes
+        all_daily = data_manager.load_data('daily', start_date=start_date, end_date=end_date, cleaned=True)
+        if all_daily is None or all_daily.empty:
+            stock_codes = ['000001.SZ', '000002.SZ', '000858.SZ', '600000.SH', '600036.SH', '600519.SH']
+        else:
+            stock_codes = all_daily['ts_code'].unique().tolist()
+
+    # 日线数据
+    daily = data_manager.load_data('daily', start_date=start_date, end_date=end_date, stock_codes=stock_codes)
+    if daily is None or daily.empty:
+        raise ValueError('无法获取日行情数据')
+    # 统一日期为 datetime 并排序
+    daily = daily.copy()
+    daily['trade_date'] = pd.to_datetime(daily['trade_date'], errors='coerce')
+    if daily['trade_date'].isna().any():
+        # 尝试按 YYYYMMDD 格式解析
+        daily['trade_date'] = pd.to_datetime(daily['trade_date'].astype(str), format='%Y%m%d', errors='coerce')
+    daily = daily.dropna(subset=['trade_date'])
+    daily = daily.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+
+    # 资产负债表（总股本）
+    bs = data_manager.load_data('balancesheet', cleaned=True)
+    if bs is None or bs.empty:
+        raise ValueError('无法获取资产负债表数据')
+    if stock_codes:
+        bs = bs[bs['ts_code'].isin(stock_codes)]
+
+    # 使用公告日作为对齐键；若无 ann_date 则退化为 end_date
+    if 'ann_date' not in bs.columns:
+        bs['ann_date'] = bs.get('end_date')
+    shares_ts = bs[['ts_code', 'ann_date', 'total_share']].dropna(subset=['total_share']).copy()
+    shares_ts['ann_date'] = pd.to_datetime(shares_ts['ann_date'], errors='coerce')
+    if shares_ts['ann_date'].isna().any():
+        shares_ts['ann_date'] = pd.to_datetime(shares_ts['ann_date'].astype(str), format='%Y%m%d', errors='coerce')
+    shares_ts = shares_ts.dropna(subset=['ann_date'])
+    shares_ts = shares_ts.sort_values(['ts_code', 'ann_date']).reset_index(drop=True)
+
+    # 使用分组逐股进行 merge_asof，避免全局排序检查造成的异常
+    merged_parts = []
+    daily_groups = daily.groupby('ts_code', sort=False)
+    shares_groups = shares_ts.groupby('ts_code', sort=False)
+    common_codes = sorted(set(daily['ts_code'].unique()).intersection(shares_ts['ts_code'].unique()))
+    for code in common_codes:
+        d = daily_groups.get_group(code).sort_values('trade_date').copy() if code in daily_groups.groups else None
+        s = shares_groups.get_group(code).sort_values('ann_date').copy() if code in shares_groups.groups else None
+        if d is None or s is None or d.empty or s.empty:
+            continue
+        # 确保 ts_code 列保留在结果中
+        part = pd.merge_asof(
+            left=d,
+            right=s[['ann_date', 'total_share']],
+            left_on='trade_date',
+            right_on='ann_date',
+            direction='backward',
         )
-        
-        if daily_data is None or daily_data.empty:
-            raise ValueError("无法获取日行情数据")
-        
-        # 获取资产负债表数据以获取股本信息（加载所有数据）
-        balance_data = data_manager.load_data(
-            data_type='balancesheet',
-            cleaned=True
-        )
-        
-        if balance_data is None or balance_data.empty:
-            raise ValueError("无法获取资产负债表数据")
-        
-        # 过滤目标股票并获取最新的股本数据
-        if stock_codes:
-            balance_data = balance_data[balance_data['ts_code'].isin(stock_codes)]
-        
-        # 获取每个股票的最新股本记录
-        balance_data = balance_data.sort_values(['ts_code', 'end_date'])
-        latest_shares = balance_data.groupby('ts_code').tail(1)[['ts_code', 'total_share']]
-        
-        # 过滤掉空值
-        latest_shares = latest_shares.dropna(subset=['total_share'])
-        
-        # 合并数据获取总股本信息
-        merged_data = daily_data.merge(
-            latest_shares,
-            left_on='ts_code',
-            right_on='ts_code',
-            how='left'
-        )
-        
-        # 检查合并结果
-        if merged_data.empty:
-            raise ValueError("数据合并失败")
-        
-        # 过滤掉缺少股本信息的记录
-        before_filter = len(merged_data)
-        merged_data = merged_data.dropna(subset=['total_share'])
-        after_filter = len(merged_data)
-        
-        if after_filter == 0:
-            raise ValueError("所有记录都缺少股本信息")
-        
-        if before_filter != after_filter:
-            print(f"  ⚠️ 过滤缺失股本数据: {before_filter} -> {after_filter} 条记录")
-        
-        # 计算市值 = 收盘价 × 总股本 / 10000 (单位：万元)
-        merged_data['market_cap'] = merged_data['close'] * merged_data['total_share'] / 10000
-        
-        # 过滤掉市值异常的记录
-        merged_data = merged_data[merged_data['market_cap'] > 0]
-        
-        # 计算对数市值因子
-        merged_data['log_market_cap'] = np.log(merged_data['market_cap'])
-        
-        # 转换为MultiIndex格式 (注意：日行情数据中股票代码字段是ts_code)
-        factor_data = merged_data.set_index(['trade_date', 'ts_code'])[['log_market_cap']]
-        factor_data.columns = ['factor']
-        
-        # 重命名索引以符合标准格式 (date, stock_code)
-        factor_data.index.names = ['date', 'stock_code']
-        
-        print(f"✅ 规模因子计算完成!")
-        print(f"  最终数据量: {len(factor_data)} 条")
-        print(f"  因子均值: {factor_data['factor'].mean():.4f}")
-        print(f"  因子标准差: {factor_data['factor'].std():.4f}")
-        
-        return factor_data
-        
-    except Exception as e:
-        print(f"❌ 规模因子计算失败: {e}")
-        raise
+        # ts_code 已在 d 中，合并后自动保留
+        merged_parts.append(part)
+    merged = pd.concat(merged_parts, axis=0, ignore_index=True) if merged_parts else pd.DataFrame()
+    if merged is None or merged.empty:
+        raise ValueError('数据合并失败')
+
+    merged = merged.dropna(subset=['total_share'])
+    if merged.empty:
+        raise ValueError('所有记录都缺少股本信息')
+
+    merged['market_cap'] = merged['close'] * merged['total_share'] / 10000
+    merged = merged[merged['market_cap'] > 0]
+    merged['log_market_cap'] = np.log(merged['market_cap'])
+
+    factor = merged.set_index(['trade_date', 'ts_code'])[['log_market_cap']]
+    factor.columns = ['factor']
+    factor.index.names = ['trade_date', 'ts_code']
+    return factor
 
 
 def run_size_factor_backtest(start_date: str = '2024-01-01',
-                           end_date: str = '2024-02-29',
-                           stock_codes: Optional[List[str]] = None,
-                           rebalance_freq: str = 'weekly',
-                           transaction_cost: float = 0.0) -> dict:
+                             end_date: str = '2024-02-29',
+                             stock_codes: Optional[List[str]] = None,
+                             rebalance_freq: str = 'weekly',
+                             transaction_cost: float = 0.0,
+                             long_direction: str = 'high') -> dict:
     """
-    运行规模因子策略回测
-    
-    参数:
-        start_date: 回测开始日期
-        end_date: 回测结束日期  
-        stock_codes: 股票代码列表
-        rebalance_freq: 调仓频率 ('daily', 'weekly', 'monthly')
-        transaction_cost: 交易费用
-    
-    返回:
-        dict: 包含回测结果的字典
+    使用 BacktestEngine 主路径运行规模因子策略回测，并集成 PerformanceAnalyzer 计算 IC。
     """
-    print(f"🚀 开始规模因子策略回测...")
-    
     # 初始化数据管理器
     data_manager = DataManager()
-    
-    # 计算规模因子
-    factor_data = calculate_size_factor(
+
+    # 使用 BacktestEngine 主路径
+    from backtest_engine.engine import BacktestEngine
+    engine = BacktestEngine(
         data_manager=data_manager,
-        start_date=start_date,
-        end_date=end_date,
-        stock_codes=stock_codes
-    )
-    
-    # 执行回测
-    print(f"🎯 执行策略回测...")
-    
-    # 在函数内部导入以避免循环导入
-    try:
-        from engine import run_backtest
-    except ImportError as e:
-        print(f"无法导入回测引擎: {e}")
-        raise
-    
-    portfolio_returns, positions = run_backtest(
-        factor_data=factor_data,
-        data_manager=data_manager,
-        start_date=start_date,
-        end_date=end_date,
+        fee=transaction_cost,
+        long_direction=long_direction,
         rebalance_freq=rebalance_freq,
-        transaction_cost=transaction_cost
+        factor_name='factor',  # 显式指定因子列名
     )
-    
-    # 计算基本业绩指标
-    total_return = (portfolio_returns + 1).prod() - 1
-    volatility = portfolio_returns.std() * np.sqrt(252)
-    sharpe_ratio = total_return / volatility if volatility > 0 else 0
-    max_drawdown = (portfolio_returns.cumsum().expanding().max() - portfolio_returns.cumsum()).max()
-    
-    print(f"✅ 回测完成!")
-    print(f"  总收益率: {total_return:.4f} ({total_return:.2%})")
-    print(f"  年化波动率: {volatility:.4f} ({volatility:.2%})")
-    print(f"  夏普比率: {sharpe_ratio:.4f}")
-    print(f"  最大回撤: {max_drawdown:.4f} ({max_drawdown:.2%})")
-    print(f"  调仓次数: {len(positions)}")
-    
-    # 尝试性能分析
-    try:
-        print(f"📊 执行性能分析...")
-        
-        # 在函数内部导入以避免循环导入
-        from performance import PerformanceAnalyzer
-        
-        # 准备性能分析所需的数据
-        # portfolio_returns 需要是DataFrame格式
-        if isinstance(portfolio_returns, pd.Series):
-            portfolio_df = pd.DataFrame({'strategy': portfolio_returns})
-        else:
-            portfolio_df = portfolio_returns
-            
-        # 创建master_data（包含next_day_return的数据）
-        # 这里简化处理，创建一个基本的master_data
-        master_data = pd.DataFrame({
-            'date': portfolio_returns.index,
-            'next_day_return': portfolio_returns.values
-        })
-        
-        analyzer = PerformanceAnalyzer(
-            portfolio_returns=portfolio_df,
-            factor_data=factor_data,
-            master_data=master_data
-        )
-        
-        # 计算性能指标
-        analyzer.calculate_metrics()
-        
-        # 显示结果
-        if hasattr(analyzer, 'metrics') and analyzer.metrics is not None:
-            print(f"📈 详细性能指标:")
-            for col in analyzer.metrics.columns:
-                metrics = analyzer.metrics[col]
-                print(f"  {col}:")
-                print(f"    年化收益: {metrics.get('annualized_return', 0):.4f}")
-                print(f"    年化波动: {metrics.get('annualized_volatility', 0):.4f}")
-                print(f"    夏普比率: {metrics.get('sharpe_ratio', 0):.4f}")
-                print(f"    最大回撤: {metrics.get('max_drawdown', 0):.4f}")
-        
-        # 尝试IC分析
-        try:
-            analyzer.calculate_ic()
-            if hasattr(analyzer, 'ic_series') and analyzer.ic_series is not None:
-                ic_mean = analyzer.ic_series.mean()
-                ic_std = analyzer.ic_series.std()
-                icir = ic_mean / ic_std if ic_std > 0 else 0
-                ic_positive_ratio = (analyzer.ic_series > 0).mean()
-                
-                print(f"🎯 IC分析结果:")
-                print(f"  IC均值: {ic_mean:.4f}")
-                print(f"  IC标准差: {ic_std:.4f}")
-                print(f"  ICIR: {icir:.4f}")
-                print(f"  IC>0比例: {ic_positive_ratio:.4f}")
-        except Exception as ic_error:
-            print(f"⚠️ IC分析失败: {ic_error}")
-            
-        analysis_results = {
-            'performance_calculated': True,
-            'ic_calculated': hasattr(analyzer, 'ic_series')
-        }
-            
-    except Exception as e:
-        print(f"⚠️ 性能分析失败: {e}")
-        analysis_results = None
-    
+    engine.prepare_data(start_date=start_date, end_date=end_date, stock_codes=stock_codes)
+    portfolio_returns = engine.run()
+
+    # 计算基本业绩指标（基于 Long_Only）
+    if not isinstance(portfolio_returns, pd.DataFrame) or 'Long_Only' not in portfolio_returns.columns:
+        raise ValueError('回测结果缺少 Long_Only 列')
+
+    series = portfolio_returns['Long_Only']
+    cum = (1 + series).cumprod()
+    total_return = float(cum.iloc[-1] - 1) if len(cum) else np.nan
+    trading_days = len(series)
+    annualized_return = float(cum.iloc[-1] ** (252 / trading_days) - 1) if trading_days > 0 else np.nan
+    volatility = float(series.std() * np.sqrt(252))
+    sharpe_ratio = float(annualized_return / volatility) if volatility > 0 and not np.isnan(annualized_return) else 0.0
+    running_max = cum.cummax()
+    drawdown = cum / running_max - 1
+    max_drawdown = float(drawdown.min()) if not drawdown.empty else np.nan
+
+    # 集成 PerformanceAnalyzer（含 IC 分析）
+    analyzer = engine.get_performance_analysis()
+    metrics_df = analyzer.calculate_metrics()
+    ic_series = analyzer.ic_series
+    analysis_results = {
+        'metrics': metrics_df,
+        'ic_series': ic_series
+    }
+
     return {
-        'factor_data': factor_data,
+        'factor_data': engine.factor_data,
         'portfolio_returns': portfolio_returns,
-        'positions': positions,
+        'positions': None,
         'performance_metrics': {
             'total_return': total_return,
+            'annualized_return': annualized_return,
             'volatility': volatility,
             'sharpe_ratio': sharpe_ratio,
             'max_drawdown': max_drawdown,
-            'rebalance_count': len(positions)
+            'rebalance_count': len(engine._get_rebalance_dates()),
         },
-        'analysis_results': analysis_results
+        'analysis_results': analysis_results,
     }
 
 
 def main():
-    """
-    主函数：演示规模因子计算和回测
-    """
-    print("🎯 规模因子策略演示")
+    """主函数：演示规模因子计算和回测"""
+    print("规模因子策略演示")
     print("=" * 50)
-    
+
     try:
         # 配置参数
         config = {
-            'start_date': '2024-01-01',
+            'start_date': '2015-09-30',
             'end_date': '2025-09-30',
             'rebalance_freq': 'weekly',
-            'transaction_cost': 0.0  # 零手续费
+            'transaction_cost': 0.0,  # 可按需调整
+            'long_direction': 'low',
         }
-        
-        print(f"📊 回测配置:")
+
+        print("回测配置:")
         for key, value in config.items():
             print(f"  {key}: {value}")
-        
+
         # 运行回测
         results = run_size_factor_backtest(**config)
-        
-        # 结果总结
-        print(f"\n📋 回测结果总结:")
+
+        # 结果总结（基于 Long_Only）
+        print("\n回测结果总结 (Long_Only):")
         metrics = results['performance_metrics']
-        print(f"  🎯 策略表现: {metrics['sharpe_ratio']:.3f} (夏普比率)")
-        print(f"  💰 总收益: {metrics['total_return']:.2%}")
-        print(f"  📊 年化波动: {metrics['volatility']:.2%}")
-        print(f"  📉 最大回撤: {metrics['max_drawdown']:.2%}")
-        print(f"  🔄 调仓次数: {metrics['rebalance_count']}")
-        
-        print(f"\n🎉 规模因子策略演示完成!")
-        
+        print(f"  夏普比率: {metrics['sharpe_ratio']:.3f}")
+        print(f"  总收益: {metrics['total_return']:.2%}")
+        print(f"  年化收益: {metrics['annualized_return']:.2%}")
+        print(f"  年化波动: {metrics['volatility']:.2%}")
+        print(f"  最大回撤: {metrics['max_drawdown']:.2%}")
+        print(f"  调仓次数: {metrics['rebalance_count']}")
+
+        print("\n规模因子策略演示完成!")
+
     except Exception as e:
-        print(f"❌ 演示运行失败: {e}")
+        print(f"演示运行失败: {e}")
         raise
 
 

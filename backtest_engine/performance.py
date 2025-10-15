@@ -91,7 +91,7 @@ class PerformanceAnalyzer:
                 break
         
         if factor_name is None:
-            raise ValueError("❌ 无法找到有效的因子列")
+            raise ValueError("无法找到有效的因子列")
         
         date_col = 'date' if 'date' in self.factor_data.columns else 'trade_date'
         stock_col = 'stock_code' if 'stock_code' in self.factor_data.columns else 'ts_code'
@@ -115,7 +115,7 @@ class PerformanceAnalyzer:
         merged_data.dropna(inplace=True)
 
         if len(merged_data) == 0:
-            print("⚠️ 警告: 合并后数据为空，无法计算IC")
+            print("警告: 合并后数据为空，无法计算IC")
             self.ic_series = pd.Series([], name='Daily_IC')
             return
 

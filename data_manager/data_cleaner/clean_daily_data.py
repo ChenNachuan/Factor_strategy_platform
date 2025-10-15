@@ -1,6 +1,14 @@
 from pathlib import Path
+import sys
+
+# 添加项目根路径以便导入 config
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
 from data_loader import load_raw_data
 from cleaning_steps import handle_outliers, handle_missing_values, filter_blacklist
+from config import CLEAN_DATA_PATH
 
 def run_pipeline():
     """
@@ -67,9 +75,7 @@ def run_pipeline():
     
     # 4. 存储清洗后的数据
     print("\n💾 步骤4: 数据存储")
-    clean_data_path = Path(__file__).resolve().parent.parent / 'clean_data'
-    clean_data_path.mkdir(parents=True, exist_ok=True)
-    save_file = clean_data_path / 'a_stock_daily_data_clean.parquet'
+    save_file = CLEAN_DATA_PATH / 'a_stock_daily_data_clean.parquet'
     
     df.to_parquet(save_file, index=False)
     

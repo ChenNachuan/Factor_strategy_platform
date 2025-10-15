@@ -2,9 +2,10 @@ import tushare as ts
 import pandas as pd
 import time
 from pathlib import Path
+from config import get_tushare_token, RAW_DATA_PATH
 
 # 初始化 Tushare API
-ts.set_token('a5dfb5990b7a5e9eda778b060c8c987f9a7fbd2a5caae8ddc7298197')
+ts.set_token(get_tushare_token())
 pro = ts.pro_api()
 
 print("Tushare API 初始化成功。")
@@ -50,18 +51,8 @@ print("所有股票获取完毕！")
 if not all_stock_data.empty:
     print("\n开始将数据存储到 Parquet 文件...")
     try:
-        # 获取当前脚本文件(.py)的绝对路径
-        current_script_path = Path(__file__).resolve()
-        # 从当前脚本路径向上回溯两级，到达 data_manager 目录
-        data_manager_dir = current_script_path.parent.parent
-        # 构建目标存储目录路径
-        save_dir = data_manager_dir / 'raw_data'
-        
-        # 确保目标目录存在，如果不存在就创建它
-        save_dir.mkdir(parents=True, exist_ok=True)
-        
         # 构建完整的文件保存路径
-        file_path = save_dir / 'a_stock_daily_data.parquet'
+        file_path = RAW_DATA_PATH / 'a_stock_daily_data.parquet'
 
         all_stock_data.to_parquet(file_path, engine='pyarrow', index=False)
         

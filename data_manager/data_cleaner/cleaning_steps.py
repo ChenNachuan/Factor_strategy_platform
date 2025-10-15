@@ -53,7 +53,7 @@ def filter_blacklist(df: pd.DataFrame) -> pd.DataFrame:
     required_cols = ['name', 'ts_code', 'trade_date', 'list_date']
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
-        print(f"   ❌ 缺少必需的列: {missing_cols}")
+        print(f"   缺少必需的列: {missing_cols}")
         return df
     
     # 1. 过滤ST股票

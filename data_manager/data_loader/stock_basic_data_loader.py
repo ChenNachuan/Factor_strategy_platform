@@ -1,6 +1,7 @@
 import tushare as ts # type: ignore
 import pandas as pd
 from pathlib import Path
+from config import get_tushare_token, RAW_DATA_PATH
 
 def download_stock_basic():
     """
@@ -11,7 +12,7 @@ def download_stock_basic():
     
     # 初始化 Tushare API
     try:
-        ts.set_token('a5dfb5990b7a5e9eda778b060c8c987f9a7fbd2a5caae8ddc7298197')
+        ts.set_token(get_tushare_token())
         pro = ts.pro_api()
         print("Tushare API 初始化成功。")
     except Exception as e:
@@ -32,7 +33,7 @@ def download_stock_basic():
 
     # 存储数据
     # 使用相对路径构建保存路径
-    save_path = Path(__file__).resolve().parent.parent / 'raw_data'
+    save_path = RAW_DATA_PATH
     
     # 确保目录存在
     save_path.mkdir(parents=True, exist_ok=True)

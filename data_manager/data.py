@@ -70,7 +70,7 @@ class DataManager:
         # 检查缓存
         if use_cache and cache_key in self._cache:
             if verbose:
-                print(f"✅ 从缓存加载 {data_type} 数据")
+                print(f" 从缓存加载 {data_type} 数据")
             return self._cache[cache_key].copy()
         
         # 加载原始数据
@@ -112,18 +112,18 @@ class DataManager:
                 
             if verbose:
                 status = "清洗后" if cleaned else "原始"
-                print(f"✅ {status}数据加载成功！")
-                print(f"   数据类型: {data_type}")
-                print(f"   数据量: {len(df):,} 条记录，{len(df.columns)} 列")
+                print(f" {status}数据加载成功！")
+                print(f"  数据类型: {data_type}")
+                print(f"  数据量: {len(df):,} 条记录，{len(df.columns)} 列")
                 
             return df
         except FileNotFoundError:
             if verbose:
-                print(f"❌ 错误：找不到文件 '{filepath}'")
+                print(f" 错误：找不到文件 '{filepath}'")
             return None
         except Exception as e:
             if verbose:
-                print(f"❌ 加载出错: {e}")
+                print(f" 加载出错: {e}")
             return None
     
     def _apply_filters(self, 
@@ -161,7 +161,7 @@ class DataManager:
         
         filtered_len = len(df)
         if original_len != filtered_len:
-            print(f"   过滤后: {filtered_len:,} 条记录 (过滤了 {original_len - filtered_len:,} 条)")
+            print(f"  过滤后: {filtered_len:,} 条记录 (过滤了 {original_len - filtered_len:,} 条)")
             
         return df
     
@@ -267,7 +267,7 @@ class DataManager:
     def clear_cache(self):
         """清空缓存"""
         self._cache.clear()
-        print("✅ 缓存已清空")
+        print("缓存已清空")
 
 # ===== 全局数据管理器实例 =====
 _global_data_manager = None
@@ -332,23 +332,6 @@ def load_financial_data(data_type: str,
         
     dm = get_data_manager()
     return dm.load_data(data_type, end_date=end_date, stock_codes=stock_codes)
-
-# ===== 向后兼容函数 =====
-def load_data_file(data_type: str, cleaned: bool = True) -> Optional[pd.DataFrame]:
-    """
-    通用数据加载函数 (保持向后兼容)
-    
-    注意: 推荐使用新的 DataManager 类或便捷函数 load_stock_data(), load_financial_data() 等
-    
-    Args:
-        data_type: 数据类型 ('daily', 'cashflow', 'balancesheet', 'income', 'index')
-        cleaned: True加载清洗后数据，False加载原始数据
-
-    Returns:
-        pd.DataFrame: 加载的数据
-    """
-    dm = get_data_manager()
-    return dm.load_data(data_type, cleaned=cleaned)
 
 # ===== 数据质量检查函数 =====
 def validate_data_quality(df: pd.DataFrame, data_type: str) -> Dict[str, Union[int, str, List, Dict]]:
@@ -433,39 +416,3 @@ def print_data_summary(summary: Dict[str, Dict]):
             if 'date_range' in info:
                 print(f"   📅 时间范围: {info['date_range'][0]} ~ {info['date_range'][1]}")
         print()
-
-# ===== 使用示例 =====
-def example_usage():
-    """使用示例代码"""
-    print("🚀 DataManager 使用示例")
-    print("-" * 40)
-    
-    # 创建数据管理器
-    dm = DataManager()
-    
-    # 1. 加载最近一年的股票数据
-    print("1️⃣ 加载股票数据:")
-    stock_data = dm.load_data('daily', start_date='2024-01-01')
-    
-    # 2. 加载指定股票的数据
-    print("\n2️⃣ 加载指定股票:")
-    specific_stocks = dm.load_data('daily', stock_codes=['000001.SZ', '000002.SZ'], 
-                                  start_date='2024-01-01')
-    
-    # 3. 使用便捷函数
-    print("\n3️⃣ 使用便捷函数:")
-    recent_data = load_stock_data(start_date='2024-06-01')
-    
-    # 4. 获取数据概览
-    print("\n4️⃣ 数据概览:")
-    summary = dm.get_data_summary()
-    print_data_summary(summary)
-    
-    # 5. 获取股票列表
-    print("\n5️⃣ 获取股票列表:")
-    stocks = dm.get_stock_list(exclude_st=True)
-    print(f"共有 {len(stocks)} 只股票（已排除ST）")
-
-if __name__ == "__main__":
-    # 运行使用示例
-    example_usage()

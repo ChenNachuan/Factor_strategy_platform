@@ -36,10 +36,12 @@ class DataManager:
         # 文件映射
         self.file_mapping = {
             'daily': 'a_stock_daily_data',
+            'daily_basic': 'a_stock_daily_basic_data',
             'cashflow': 'a_stock_cashflow_data', 
             'balancesheet': 'a_stock_balancesheet_data',
             'income': 'a_stock_income_data',
-            'index': 'a_index_daily_data'
+            'index': 'a_index_daily_data',
+            'index_weight': 'index_weight_data'
         }
     
     def load_data(self, 
@@ -54,7 +56,7 @@ class DataManager:
         加载数据 - 量化研究专用版本
         
         Args:
-            data_type: 数据类型 ('daily', 'cashflow', 'balancesheet', 'income', 'index')
+            data_type: 数据类型 ('daily', 'daily_basic', 'cashflow', 'balancesheet', 'income', 'index', 'index_weight')
             cleaned: 是否加载清洗后的数据
             use_cache: 是否使用缓存
             start_date: 开始日期 (YYYY-MM-DD)
@@ -329,6 +331,63 @@ def load_index_data(start_date: Optional[str] = None,
     """
     dm = get_data_manager()
     return dm.load_data('index', start_date=start_date, end_date=end_date)
+
+def load_daily_basic_data(start_date: Optional[str] = None,
+                         end_date: Optional[str] = None,
+                         stock_codes: Optional[List[str]] = None) -> Optional[pd.DataFrame]:
+    """
+    快速加载每日指标数据
+    
+    Args:
+        start_date: 开始日期 (YYYY-MM-DD)
+        end_date: 结束日期 (YYYY-MM-DD)
+        stock_codes: 股票代码列表
+        
+    Returns:
+        pd.DataFrame: 每日指标数据（包含换手率、市盈率、市净率、市值等）
+    """
+    dm = get_data_manager()
+    return dm.load_data('daily_basic', start_date=start_date, end_date=end_date,
+                       stock_codes=stock_codes)
+
+def load_index_weight_data(start_date: Optional[str] = None,
+                          end_date: Optional[str] = None,
+                          index_codes: Optional[List[str]] = None) -> Optional[pd.DataFrame]:
+    """
+    快速加载指数成分权重数据（月度数据）
+    
+    Args:
+        start_date: 开始日期 (YYYY-MM-DD)，建议输入当月第一天
+        end_date: 结束日期 (YYYY-MM-DD)，建议输入当月最后一天
+        index_codes: 指数代码列表，如 ['000300.SH', '000905.SH']
+        
+    Returns:
+        pd.DataFrame: 指数成分权重数据
+            - index_code: 指数代码
+            - con_code: 成分股代码
+            - trade_date: 交易日期
+            - weight: 权重
+    
+    Examples:
+        >>> # 获取2024年全年的沪深300权重数据
+        >>> weights = load_index_weight_data(
+        ...     start_date='2024-01-01',
+        ...     end_date='2024-12-31',
+        ...     index_codes=['000300.SH']
+        ... )
+    """
+    dm = get_data_manager()
+    df = dm.load_data('index_weight', start_date=start_date, end_date=end_date,
+                     verbose=True)
+    
+    # 如果指定了指数代码，进行过滤
+    if df is not None and index_codes is not None:
+        if 'index_code' in df.columns:
+            df = df[df['index_code'].isin(index_codes)]
+        else:
+            warnings.warn("index_weight数据中没有'index_code'列，无法按指数代码过滤")
+    
+    return df
 
 def load_financial_data(data_type: str,
                        end_date: Optional[str] = None,

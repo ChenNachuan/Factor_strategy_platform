@@ -106,7 +106,7 @@ def run_size_factor_backtest(start_date: str = '2024-01-01',
                              end_date: str = '2024-02-29',
                              stock_codes: Optional[List[str]] = None,
                              rebalance_freq: str = 'weekly',
-                             transaction_cost: float = 0.0,
+                             transaction_cost: float = 0.0003,
                              long_direction: str = 'high') -> dict:
     """
     使用 BacktestEngine 主路径运行规模因子策略回测，并集成 PerformanceAnalyzer 计算 IC。
@@ -177,7 +177,7 @@ def main():
             'start_date': '2015-09-30',
             'end_date': '2025-09-30',
             'rebalance_freq': 'weekly',
-            'transaction_cost': 0.0,  # 可按需调整
+            'transaction_cost': 0.0003,  # 0.03% 交易费用
             'long_direction': 'low',
         }
 

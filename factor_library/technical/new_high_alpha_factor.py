@@ -94,14 +94,30 @@ def calculate_new_high_alpha_factor(
     lookback_window: int = 60,
     n1_threshold: int = 20,
     n2_threshold: int = 50,
+    # 估值筛选参数
+    pe_min: float = 0.0,
+    pe_max: float = 150.0,
+    # 市值筛选参数
+    use_marketcap_filter: bool = True,
+    # 回踩确认参数
+    enable_pullback: bool = True,
+    pullback_window: int = 10,
+    pullback_min: float = 0.03,
+    pullback_max: float = 0.08,
 ) -> pd.DataFrame:
     """
-    计算创新高精选Alpha因子 (v2) - 使用换手率版本
+    计算创新高精选Alpha因子 (v3) - 增强版
     
-    该版本根据每日有效创新高样本数量，采用动态筛选策略。
-    因子值为二元值（1表示入选，NaN表示未入选）。
+    该版本在v2基础上增加了以下改进：
+    1. **估值筛选**：使用PE-TTM过滤亏损和高估值股票
+    2. **市值筛选**：优先选择市值排名前50%的股票（稳定性代理）
+    3. **回踩确认机制**：要求突破后回调3-8%但未跌破前高才产生最终信号
     
-    **关键改进**：使用 daily_basic 中的换手率替代成交额进行放量确认
+    **关键改进**：
+    - 使用 daily_basic 中的换手率替代成交额进行放量确认
+    - 使用 PE-TTM 和市值作为基本面筛选，替代分析师预测EPS
+    - 引入回踩确认机制，提高信号质量
+    
     **默认股票池**：中证1000成分股（000852.SH）
 
     Parameters
@@ -113,13 +129,27 @@ def calculate_new_high_alpha_factor(
     stock_codes : Optional[List[str]]
         股票池。如果为None，则自动使用中证1000成分股。
     high_window : int
-        新高窗口期。
+        新高窗口期，默认240天。
     volume_ma_window : int
-        换手率均线窗口。
+        换手率均线窗口，默认10天。
     lookback_window : int
-        前期表现回看窗口。
+        前期表现回看窗口，默认60天。
     n1_threshold, n2_threshold : int
         动态筛选样本数阈值。
+    pe_min : float
+        PE-TTM最小值，默认0（排除亏损股）。
+    pe_max : float
+        PE-TTM最大值，默认150（排除高估值股）。
+    use_marketcap_filter : bool
+        是否使用市值筛选，默认True。
+    enable_pullback : bool
+        是否启用回踩确认机制，默认True。
+    pullback_window : int
+        回踩观察窗口，默认10天。
+    pullback_min : float
+        最小回调幅度，默认3%。
+    pullback_max : float
+        最大回调幅度，默认8%。
 
     Returns
     -------
@@ -160,17 +190,19 @@ def calculate_new_high_alpha_factor(
     daily['trade_date'] = pd.to_datetime(daily['trade_date'])
     daily = daily.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
     
-    # 合并换手率数据
+    # 合并换手率、PE-TTM和市值数据
     daily_basic = daily_basic.copy()
     daily_basic['trade_date'] = pd.to_datetime(daily_basic['trade_date'])
     daily = pd.merge(
         daily,
-        daily_basic[['ts_code', 'trade_date', 'turnover_rate']],
+        daily_basic[['ts_code', 'trade_date', 'turnover_rate', 'pe_ttm', 'total_mv']],
         on=['ts_code', 'trade_date'],
         how='left'
     )
     
     print(f"✅ 成功加载数据，包含换手率字段: {'turnover_rate' in daily.columns}")
+    print(f"   包含PE-TTM字段: {'pe_ttm' in daily.columns}")
+    print(f"   包含市值字段: {'total_mv' in daily.columns}")
     print(f"   数据时间范围: {daily['trade_date'].min()} ~ {daily['trade_date'].max()}")
     print(f"   股票数量: {daily['ts_code'].nunique()}")
 
@@ -232,8 +264,13 @@ def calculate_new_high_alpha_factor(
     is_volume_breakthrough = daily['turnover_ma'] > daily['prev_high_turnover_ma']
     valid_mask = valid_mask & is_volume_breakthrough.fillna(False)
     
+    # 2.3 估值筛选：过滤PE-TTM不在合理区间的股票
+    print(f"应用估值筛选: {pe_min} < PE-TTM < {pe_max}...")
+    is_pe_valid = (daily['pe_ttm'] > pe_min) & (daily['pe_ttm'] < pe_max)
+    valid_mask = valid_mask & is_pe_valid.fillna(False)
+    
     effective_new_high = daily[valid_mask].copy()
-    print(f"换手率确认后，每日有效创新高样本池构建完成，共 {len(effective_new_high)} 个事件。")
+    print(f"估值筛选后，每日有效创新高样本池构建完成，共 {len(effective_new_high)} 个事件。")
 
     # 步骤 3: 计算截面筛选所需指标
     print("\n" + "=" * 60)
@@ -247,17 +284,20 @@ def calculate_new_high_alpha_factor(
     daily['prior_turnover'] = daily.groupby('ts_code')['turnover_rate'].transform(
         lambda x: x.rolling(window=lookback_window).mean().shift(1)
     )
+    
+    # 提取市值数据（已经在daily_basic中）
+    # total_mv 字段已经在前面merge时加入
 
     effective_new_high = pd.merge(
-        effective_new_high[['trade_date', 'ts_code']],
-        daily[['trade_date', 'ts_code', 'prior_return', 'prior_turnover']],
+        effective_new_high[['trade_date', 'ts_code', 'close']],  # 保留close用于回踩确认
+        daily[['trade_date', 'ts_code', 'prior_return', 'prior_turnover', 'total_mv']],
         on=['trade_date', 'ts_code'],
         how='left'
     )
 
     # 步骤 4: 动态截面筛选与最终因子生成
     print("\n" + "=" * 60)
-    print("步骤 4: 动态截面筛选与最终因子生成")
+    print("步骤 4: 动态截面筛选（加入市值筛选）")
     
     final_selection = []
     
@@ -269,6 +309,11 @@ def calculate_new_high_alpha_factor(
         pr_median = group['prior_return'].quantile(0.5)
         pt_median = group['prior_turnover'].quantile(0.5)
         
+        # 市值筛选：只选择市值排名前50%的股票
+        if use_marketcap_filter:
+            mv_median = group['total_mv'].quantile(0.5)
+            group = group[group['total_mv'] >= mv_median]
+        
         selected_group = None
         
         if n < n1_threshold:
@@ -276,7 +321,7 @@ def calculate_new_high_alpha_factor(
             selected_group = group[group['prior_return'] <= pr_median]
         else:
             # 情况二和三：N >= 20，综合使用指标A和指标B
-            # 注：由于缺少EPS数据，N >= 50 时也只使用A和B
+            # 使用PE-TTM和市值替代EPS
             selected_group = group[
                 (group['prior_return'] <= pr_median) &
                 (group['prior_turnover'] <= pt_median)
@@ -290,9 +335,68 @@ def calculate_new_high_alpha_factor(
         return pd.DataFrame(columns=['factor']).rename_axis(['trade_date', 'ts_code'])
         
     final_df = pd.concat(final_selection, ignore_index=True)
-    final_df['factor'] = 1.0
     
-    factor_data = final_df[['trade_date', 'ts_code', 'factor']].set_index(['trade_date', 'ts_code'])
+    # 步骤 5: 回踩确认机制（可选）
+    if enable_pullback:
+        print("\n" + "=" * 60)
+        print(f"步骤 5: 回踩确认机制（观察窗口={pullback_window}天，回调范围={pullback_min*100:.1f}%-{pullback_max*100:.1f}%）")
+        
+        # 为每个初选信号创建观察池
+        final_df = final_df.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+        final_df['signal_high'] = final_df['close']  # 记录信号产生时的价格（新高价格）
+        
+        # 合并后续价格数据以进行回踩检测
+        pullback_confirmed = []
+        
+        for idx, row in final_df.iterrows():
+            ts_code = row['ts_code']
+            signal_date = row['trade_date']
+            signal_high = row['signal_high']
+            
+            # 获取该股票在信号日之后pullback_window天内的数据
+            future_data = daily[
+                (daily['ts_code'] == ts_code) &
+                (daily['trade_date'] > signal_date) &
+                (daily['trade_date'] <= signal_date + pd.Timedelta(days=pullback_window * 2))  # 留足自然日
+            ].head(pullback_window).copy()
+            
+            if future_data.empty:
+                continue
+            
+            # 计算回调幅度（相对于新高价格）
+            future_data['pullback_pct'] = (future_data['close'] - signal_high) / signal_high
+            
+            # 找到是否存在符合条件的回踩：
+            # 1. 回调幅度在 -pullback_max 到 -pullback_min 之间（即下跌3%-8%）
+            # 2. 没有跌破前高（这里简化为没有跌破信号日价格的90%，可以根据需要调整）
+            valid_pullback = future_data[
+                (future_data['pullback_pct'] >= -pullback_max) &
+                (future_data['pullback_pct'] <= -pullback_min) &
+                (future_data['close'] >= signal_high * 0.92)  # 未跌破前高太多
+            ]
+            
+            if not valid_pullback.empty:
+                # 取第一个符合条件的回踩日期作为最终信号日期
+                confirm_date = valid_pullback.iloc[0]['trade_date']
+                pullback_confirmed.append({
+                    'trade_date': confirm_date,
+                    'ts_code': ts_code,
+                    'signal_date': signal_date,
+                    'pullback_pct': valid_pullback.iloc[0]['pullback_pct']
+                })
+        
+        if pullback_confirmed:
+            pullback_df = pd.DataFrame(pullback_confirmed)
+            pullback_df['factor'] = 1.0
+            factor_data = pullback_df[['trade_date', 'ts_code', 'factor']].set_index(['trade_date', 'ts_code'])
+            print(f"✅ 回踩确认完成！从 {len(final_df)} 个初选信号中确认了 {len(pullback_df)} 个回踩信号。")
+        else:
+            print("⚠️ 警告：没有找到任何符合回踩条件的信号。")
+            return pd.DataFrame(columns=['factor']).rename_axis(['trade_date', 'ts_code'])
+    else:
+        # 不使用回踩确认，直接使用截面筛选结果
+        final_df['factor'] = 1.0
+        factor_data = final_df[['trade_date', 'ts_code', 'factor']].set_index(['trade_date', 'ts_code'])
     
     print(f"\n✅ 创新高精选 Alpha 因子计算完成！共 {len(factor_data)} 条有效记录。")
     
@@ -309,12 +413,25 @@ def run_new_high_alpha_backtest(
     lookback_window: int = 60,
     rebalance_freq: str = 'weekly',
     transaction_cost: float = 0.0003,
+    # 新增参数
+    pe_min: float = 0.0,
+    pe_max: float = 150.0,
+    use_marketcap_filter: bool = True,
+    enable_pullback: bool = True,
+    pullback_window: int = 10,
+    pullback_min: float = 0.03,
+    pullback_max: float = 0.08,
 ) -> dict:
     """
-    运行新版创新高精选Alpha因子（v2 - 换手率版本）的回测。
+    运行新版创新高精选Alpha因子（v3 - 增强版）的回测。
     
     由于因子是二元值（1/NaN），此回测采用Long-Only策略，
     即每日等权持有所有因子值为1的股票。
+    
+    **v3新增功能**：
+    - PE-TTM估值筛选
+    - 市值筛选（优先大市值）
+    - 回踩确认机制
     
     **默认股票池**：中证1000成分股
 
@@ -330,6 +447,16 @@ def run_new_high_alpha_backtest(
         调仓频率，用于估算交易成本。
     transaction_cost : float
         单边交易成本。
+    pe_min, pe_max : float
+        PE-TTM筛选区间。
+    use_marketcap_filter : bool
+        是否使用市值筛选。
+    enable_pullback : bool
+        是否启用回踩确认机制。
+    pullback_window : int
+        回踩观察窗口。
+    pullback_min, pullback_max : float
+        回踩幅度区间。
 
     Returns
     -------
@@ -348,6 +475,13 @@ def run_new_high_alpha_backtest(
         high_window=high_window,
         volume_ma_window=volume_ma_window,
         lookback_window=lookback_window,
+        pe_min=pe_min,
+        pe_max=pe_max,
+        use_marketcap_filter=use_marketcap_filter,
+        enable_pullback=enable_pullback,
+        pullback_window=pullback_window,
+        pullback_min=pullback_min,
+        pullback_max=pullback_max,
     )
     
     if factor_data.empty:
@@ -418,6 +552,42 @@ def run_new_high_alpha_backtest(
     drawdown = cum_returns / running_max - 1
     max_drawdown = drawdown.min() if not drawdown.empty else 0
 
+    # IC分析：计算因子值与未来收益的相关性
+    # 对于二元因子（1/NaN），我们计算每日入选股票的平均收益 vs 全市场平均收益的差异
+    ic_series = None
+    ic_mean = None
+    ic_std = None
+    icir = None
+    ic_positive_ratio = None
+    
+    try:
+        # 按日期分组计算IC
+        ic_list = []
+        for date in combined['trade_date'].unique():
+            date_data = combined[combined['trade_date'] == date]
+            if len(date_data) >= 2:  # 至少需要2个样本
+                # 因子值为1的股票
+                factor_returns = date_data['next_return']
+                
+                # 加载当天全市场数据计算基准
+                all_stocks = stock_data[stock_data['trade_date'] == date]['next_return']
+                if len(all_stocks) > 0:
+                    market_avg = all_stocks.mean()
+                    factor_avg = factor_returns.mean()
+                    # IC定义为因子选股的超额收益
+                    ic = factor_avg - market_avg
+                    ic_list.append({'trade_date': date, 'ic': ic})
+        
+        if ic_list:
+            ic_series = pd.DataFrame(ic_list).set_index('trade_date')['ic']
+            ic_mean = ic_series.mean()
+            ic_std = ic_series.std()
+            icir = ic_mean / ic_std if ic_std > 0 else 0
+            ic_positive_ratio = (ic_series > 0).mean()
+    except Exception as e:
+        print(f"⚠️ IC计算失败: {e}")
+        ic_series = None
+
     return {
         'factor_data': factor_data,
         'portfolio_returns': portfolio_returns,
@@ -428,28 +598,43 @@ def run_new_high_alpha_backtest(
             'sharpe_ratio': sharpe_ratio,
             'max_drawdown': max_drawdown,
         },
-        'analysis_results': {}
+        'analysis_results': {
+            'ic_series': ic_series,
+            'ic_mean': ic_mean,
+            'ic_std': ic_std,
+            'icir': icir,
+            'ic_positive_ratio': ic_positive_ratio,
+        }
     }
 
 
 
 def main():
-    """主函数：演示新版创新高精选Alpha因子计算和回测（使用中证1000成分股）"""
+    """主函数：演示新版创新高精选Alpha因子计算和回测（v3 - 增强版）"""
     print("=" * 60)
-    print("创新高精选 Alpha 因子 (v2 - 换手率版本)")
+    print("创新高精选 Alpha 因子 (v3 - 增强版)")
     print("股票池: 中证1000成分股")
+    print("新功能: PE-TTM筛选 + 市值筛选 + 回踩确认")
     print("=" * 60)
 
     try:
         # 配置参数
         config = {
-            'start_date': '2019-01-01',
-            'end_date': '2020-12-31',
+            'start_date': '2024-01-01',
+            'end_date': '2025-09-30',
             'high_window': 240,
             'volume_ma_window': 10,
             'lookback_window': 60,
             'rebalance_freq': 'weekly',
             'transaction_cost': 0.0003,
+            # v3新增参数
+            'pe_min': 0.0,
+            'pe_max': 150.0,
+            'use_marketcap_filter': True,
+            'enable_pullback': True,
+            'pullback_window': 10,
+            'pullback_min': 0.03,
+            'pullback_max': 0.08,
         }
 
         print("\n回测配置:")
@@ -472,6 +657,17 @@ def main():
             print(f"  年化波动率: {metrics['volatility']:.2%}")
             print(f"  夏普比率: {metrics['sharpe_ratio']:.2f}")
             print(f"  最大回撤: {metrics['max_drawdown']:.2%}")
+
+            # IC分析结果
+            analysis = results['analysis_results']
+            if analysis.get('ic_series') is not None:
+                print(f"\n📊 IC分析:")
+                print(f"  IC均值: {analysis['ic_mean']:.4f}")
+                print(f"  IC标准差: {analysis['ic_std']:.4f}")
+                print(f"  ICIR: {analysis['icir']:.4f}")
+                print(f"  IC>0占比: {analysis['ic_positive_ratio']:.2%}")
+            else:
+                print(f"\n⚠️ IC分析: 数据不足，无法计算")
 
             print(f"\n📈 因子覆盖:")
             factor_data = results['factor_data']
